@@ -1,23 +1,22 @@
-name: OnePlus_Pad2_Pro
+name: OnePlus_Pad2_Pro_C15
 on:
   workflow_dispatch:
     inputs:
       enable_kpm:
-        description: "启用 KPM 模块"
+        description: "启用 KPM 模块 (SukiSU Ultra)"
         required: false
         default: true
         type: boolean
       skip_version_check:
-        description: "跳过版本比较"
+        description: "跳过版本比较强制编译"
         required: false
         default: false
         type: boolean
-
   schedule:
     - cron: '0 22 * * *'
 
 jobs:
-  build:
+  build_kernel:
     runs-on: ubuntu-latest
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
@@ -26,92 +25,107 @@ jobs:
       CCACHE_DIR: /home/runner/.ccache
       CCACHE_MAXSIZE: 16G
     steps:
-      - name: Maximize build space
+      - name: Maximize Build Space
         uses: easimon/maximize-build-space@master
         with:
           root-reserve-mb: 8192
-          temp-reserve-mb: 2048
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
+          temp-reserve-mb: 4096
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+          remove-codeql: true
 
-      - name: Configure Git
+      - name: Configure Git Identity
         run: |
           git config --global user.name "44C38B8"
           git config --global user.email "b2762537725@163.com"
 
-      - name: Install dependencies
+      - name: Install Build Dependencies
         run: |
-          sudo apt update
-          sudo apt install -y python3 git curl ccache zip libelf-dev bc cpio flex bison libssl-dev
+          sudo apt update -y
+          sudo apt install -y python3 git curl ccache zip libelf-dev bc flex bison libssl-dev
 
-      - name: Restore ccache
+      - name: Restore ccache Cache
         uses: actions/cache@v3
         with:
           path: /home/runner/.ccache
-          key: ccache-${{ runner.os }}-${{ github.ref }}
+          key: ccache-OPPad2Pro-C15-${{ github.sha }}
           restore-keys: |
-            ccache-${{ runner.os }}-
+            ccache-OPPad2Pro-C15-
 
-      - name: Compare Version
-        id: check
-        if: ${{!inputs.skip_version_check}}
+      - name: Version Check (Prevent Duplicate Build)
+        id: version_check
+        if: ${{ !inputs.skip_version_check }}
         run: |
-          git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git SUKI/
+          git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git SUKI --depth=1
           cd SUKI
-          KSU_GIT_VERSION=$(git rev-list --count HEAD)
-          KSU_VERSION=$((37185 + KSU_GIT_VERSION))
-          LATEST_TAG=$(git ls-remote --tags https://github.com/44C38B8/oneplus13_a5p_sukisu.git | tail -n1 | sed 's/.*\///')
-          if [ $LATEST_TAG -eq $KSU_VERSION ];then
-            echo "should_cancel=yes" >> $GITHUB_OUTPUT
+          KSU_GIT_VER=$(git rev-list --count HEAD)
+          CURRENT_VER=$((37185 + KSU_GIT_VER))
+          LATEST_TAG=$(git ls-remote --tags https://github.com/44C38B8/oneplus13_a5p_sukisu.git | grep -oE '[0-9]+$' | tail -n1)
+          
+          if [ -n "$LATEST_TAG" ] && [ "$CURRENT_VER" -eq "$LATEST_TAG" ]; then
+            echo "should_cancel=true" >> $GITHUB_OUTPUT
+            echo "::warning::版本未更新，取消编译。"
+          else
+            echo "should_cancel=false" >> $GITHUB_OUTPUT
+            echo "KSUVER=$CURRENT_VER" >> $GITHUB_ENV
           fi
 
-      - name: Install repo tool
-        if: steps.check.outputs.should_cancel != 'yes'
+      - name: Install Repo Tool
+        if: steps.version_check.outputs.should_cancel != 'true'
         run: |
           curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
           chmod a+x ~/repo
           sudo mv ~/repo /usr/local/bin/repo
 
-      - name: Initialize repo and sync
-        if: steps.check.outputs.should_cancel != 'yes'
+      - name: Sync Kernel Source (SM8750 / C15)
+        if: steps.version_check.outputs.should_cancel != 'true'
         run: |
-          mkdir kernel_workspace && cd kernel_workspace
+          mkdir -p kernel_workspace && cd kernel_workspace
           repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/sm8750 -m oneplus_pad_2_pro.xml --depth=1
-          repo --trace sync -c -j$(nproc --all) --no-tags
-          rm kernel_platform/common/android/abi_gki_protected_exports_* || true
-          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || true
+          repo sync -c -j$(nproc --all) --no-tags --force-sync
+          # Cleanup ABI files for C15
+          rm -f kernel_platform/common/android/abi_gki_protected_exports_*
+          rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_*
 
-      - name: Set up SukiSU
-        if: steps.check.outputs.should_cancel != 'yes'
+      - name: Integrate SukiSU Ultra (Built-in)
+        if: steps.version_check.outputs.should_cancel != 'true'
         run: |
           echo "DATE=$(date +%F)" >> $GITHUB_ENV
           cd kernel_workspace/kernel_platform
+          # Fetch latest SukiSU Ultra
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
-          cd KernelSU
-          KSU_VERSION=$(expr $(git rev-list --count main) + 37185)
-          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          # Calculate Version if not set
+          if [ -z "${{ env.KSUVER }}" ]; then
+            cd KernelSU
+            KSUVER=$((37185 + $(git rev-list --count main)))
+            echo "KSUVER=$KSUVER" >> $GITHUB_ENV
+          fi
 
-      - name: Set up susfs & lz4k
-        if: steps.check.outputs.should_cancel != 'yes'
+      - name: Apply SUSFS & LZ4K Patches (6.6.57)
+        if: steps.version_check.outputs.should_cancel != 'true'
         run: |
           cd kernel_workspace
+          # Clone dependencies
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6 --depth=1
           git clone https://github.com/SukiSU-Ultra/SukiSU_patch.git --depth=1
+          
+          cd kernel_platform/common
+          # Copy SUSFS files
+          cp ../../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./
+          cp -rf ../../susfs4ksu/kernel_patches/fs ./
+          cp -rf ../../susfs4ksu/kernel_patches/include ./
+          # Copy LZ4K files
+          cp -rf ../../SukiSU_patch/other/zram/lz4k/{include,lib,crypto} ./
+          cp -rf ../../SukiSU_patch/other/zram/lz4k_oplus ./lib/
+          # Apply patches
+          patch -p1 -F 3 < 50_add_susfs_in_gki-android15-6.6.patch || echo "SUSFS patch applied or skipped"
 
-          cd kernel_platform
-          cp -rf ../susfs4ksu/kernel_patches/{50_add_susfs_in_gki-android15-6.6.patch,fs,include} ./common/
-          cp -rf ../SukiSU_patch/other/zram/lz4k/{include,lib,crypto} ./common/
-          cp -rf ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/
-
-          cd common
-          patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
-
-      - name: HMBird OGKI → GKI patch (C15 适配)
-        if: steps.check.outputs.should_cancel != 'yes'
+      - name: HMBird OGKI -> GKI Patch (Critical for C15)
+        if: steps.version_check.outputs.should_cancel != 'true'
         run: |
           cd kernel_workspace/kernel_platform/common/drivers
+          # Correct indentation here is crucial for YAML
           cat << 'EOF' > hmbird_patch.c
 #include <linux/init.h>
 #include <linux/module.h>
@@ -126,7 +140,7 @@ static int __init hmbird_patch_init(void)
 
     np = of_find_node_by_path("/soc/oplus,hmbird/version_type");
     if (!np) {
-        pr_info("hmbird_patch: node not found\n");
+        pr_info("hmbird_patch: Node not found\n");
         return 0;
     }
 
@@ -153,100 +167,132 @@ static int __init hmbird_patch_init(void)
 
     of_remove_property(np, prop);
     of_add_property(np, new_prop);
-    pr_info("hmbird_patch: patched to HMBIRD_GKI\n");
+    pr_info("hmbird_patch: Successfully patched to HMBIRD_GKI\n");
     of_node_put(np);
     return 0;
 }
 early_initcall(hmbird_patch_init);
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Force HMBIRD_OGKI to HMBIRD_GKI");
+MODULE_DESCRIPTION("Force HMBIRD_OGKI to HMBIRD_GKI for ColorOS 15");
 EOF
+          # Add to Makefile
           grep -q "hmbird_patch.o" Makefile || echo "obj-y += hmbird_patch.o" >> Makefile
 
-      - name: Apply lz4kd patch
-        if: steps.check.outputs.should_cancel != 'yes'
+      - name: Apply LZ4KD Patch
+        if: steps.version_check.outputs.should_cancel != 'true'
         run: |
           cd kernel_workspace/kernel_platform/common
           cp ../../SukiSU_patch/other/zram/zram_patch/6.6/lz4kd.patch ./
-          patch -p1 -F 3 < lz4kd.patch || true
+          patch -p1 -F 3 < lz4kd.patch || echo "LZ4KD patch applied or skipped"
 
-      - name: Config KSU + SUSFS + BBR + C15 开关
-        if: steps.check.outputs.should_cancel != 'yes'
+      - name: Kernel Configuration (Defconfig)
+        if: steps.version_check.outputs.should_cancel != 'true'
         run: |
           cd kernel_workspace/kernel_platform
-          cfg=./common/arch/arm64/configs/gki_defconfig
+          DEFCONFIG=./common/arch/arm64/configs/gki_defconfig
+          
+          # Base Config
+          echo "# SukiSU Ultra Base" >> $DEFCONFIG
+          echo "CONFIG_KSU=y" >> $DEFCONFIG
+          echo "CONFIG_LOCALVERSION_AUTO=n" >> $DEFCONFIG
+          
+          # SUSFS Config (Full)
+          echo "# SUSFS Configuration" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $DEFCONFIG
 
-          echo "# SukiSU & SUSFS" >> $cfg
-          echo "CONFIG_KSU=y" >> $cfg
-          echo "CONFIG_KSU_SUSFS=y" >> $cfg
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> $cfg
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $cfg
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $cfg
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> $cfg
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> $cfg
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> $cfg
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> $cfg
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> $cfg
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $cfg
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> $cfg
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> $cfg
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> $cfg
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $cfg
+          # Compression (LZ4K/LZ4KD)
+          echo "# Compression" >> $DEFCONFIG
+          echo "CONFIG_CRYPTO_LZ4HC=y" >> $DEFCONFIG
+          echo "CONFIG_CRYPTO_LZ4K=y" >> $DEFCONFIG
+          echo "CONFIG_CRYPTO_LZ4KD=y" >> $DEFCONFIG
+          echo "CONFIG_CRYPTO_842=y" >> $DEFCONFIG
 
-          echo "# LZ4K & ZRAM" >> $cfg
-          echo "CONFIG_CRYPTO_LZ4HC=y" >> $cfg
-          echo "CONFIG_CRYPTO_LZ4K=y" >> $cfg
-          echo "CONFIG_CRYPTO_LZ4KD=y" >> $cfg
-          echo "CONFIG_CRYPTO_842=y" >> $cfg
+          # Network (BBR)
+          echo "# Network (BBR)" >> $DEFCONFIG
+          echo "CONFIG_TCP_CONG_ADVANCED=y" >> $DEFCONFIG
+          echo "CONFIG_TCP_CONG_BBR=y" >> $DEFCONFIG
+          echo "CONFIG_NET_SCH_FQ=y" >> $DEFCONFIG
+          echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" >> $DEFCONFIG
 
-          echo "# BBR" >> $cfg
-          echo "CONFIG_TCP_CONG_ADVANCED=y" >> $cfg
-          echo "CONFIG_TCP_CONG_BBR=y" >> $cfg
-          echo "CONFIG_NET_SCH_FQ=y" >> $cfg
-          echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" >> $cfg
+          # Disable defconfig check for C15
+          sed -i 's/check_defconfig//' ./common/build.config.gki
 
-          sed -i 's/check_defconfig//' common/build.config.gki
-
-      - name: 启用 KPM 模块（SukiSU Ultra 专用）
-        if: ${{ inputs.enable_kpm && steps.check.outputs.should_cancel != 'yes' }}
+      - name: Enable KPM Module (Conditional)
+        if: ${{ inputs.enable_kpm && steps.version_check.outputs.should_cancel != 'true' }}
         run: |
           cd kernel_workspace/kernel_platform
-          echo "CONFIG_KPM=y" >> common/arch/arm64/configs/gki_defconfig
-          sed -i 's/check_defconfig//' common/build.config.gki
+          echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
 
-      - name: Build Kernel
-        if: steps.check.outputs.should_cancel != 'yes'
+      - name: Build Kernel (6.6.57 - LLVM/Clang)
+        if: steps.version_check.outputs.should_cancel != 'true'
         run: |
-          export KBUILD_BUILD_TIMESTAMP="$(date -u)"
           cd kernel_workspace/kernel_platform/common
+          # Set Build Timestamp
+          export KBUILD_BUILD_TIMESTAMP="$(date -u)"
+          # Path to Clang Toolchain
+          export PATH="$PWD/../prebuilts/clang/host/linux-x86/clang-r510928/bin:$PATH"
+          # Build Command
           make -j$(nproc --all) LLVM=1 ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CC=clang LD=ld.lld HOSTLD=ld.lld \
             O=out KCFLAGS+=-O3 gki_defconfig all
 
-      - name: Patch kernel Image
-        if: steps.check.outputs.should_cancel != 'yes'
+      - name: Post Build Patch (SukiSU)
+        if: steps.version_check.outputs.should_cancel != 'true'
         run: |
           cd kernel_workspace/kernel_platform/common/out/arch/arm64/boot
+          # Download latest patcher
           curl -L https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.12.0/patch_linux -o patch_linux
           chmod +x patch_linux
+          # Apply patch
           ./patch_linux
+          # Rename output
           mv oImage Image
 
-      - name: Pack AnyKernel3
-        if: steps.check.outputs.should_cancel != 'yes'
+      - name: Package with AnyKernel3
+        if: steps.version_check.outputs.should_cancel != 'true'
         run: |
           git clone https://github.com/Kernel-SU/AnyKernel3.git --depth=1
           cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image AnyKernel3/
           cd AnyKernel3
-          zip -9 -r SukiSU_${{ env.KSUVER }}_OPPad2Pro_C15.zip *
+          # Create flashable zip
+          zip -9 -r SukiSU_${{ env.KSUVER }}_OPPad2Pro_C15_6.6.57.zip *
 
-      - name: Upload & Release
-        if: steps.check.outputs.should_cancel != 'yes'
-        uses: softprops/softprops/action-gh-release@v1
+      - name: Upload Artifact
+        if: steps.version_check.outputs.should_cancel != 'true'
+        uses: actions/upload-artifact@v4
         with:
-          name: SukiSU ${{ env.KSUVER }} - OnePlus Pad 2 Pro C15
-          body: "适配：一加平板2 Pro • ColorOS 15 • SukiSU Ultra • KPM"
+          name: SukiSU_${{ env.KSUVER }}_OPPad2Pro
+          path: AnyKernel3/*.zip
+
+      - name: Create GitHub Release
+        if: steps.version_check.outputs.should_cancel != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: SukiSU v${{ env.KSUVER }} | OPPad2Pro | C15 | 6.6.57
+          body: |
+            **Device**: OnePlus Pad 2 Pro
+            **System**: ColorOS 15 (Android 15)
+            **Kernel**: 6.6.57
+            **Features**:
+            - SukiSU Ultra Built-in
+            - KPM Support (Enabled: ${{ inputs.enable_kpm }})
+            - SUSFS Full Support
+            - LZ4K / LZ4KD Compression
+            - TCP BBR
+            - HMBird GKI Patch Applied
           tag_name: ${{ env.KSUVER }}
           prerelease: true
           files: AnyKernel3/*.zip
