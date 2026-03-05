@@ -3,12 +3,12 @@ on:
   workflow_dispatch:
     inputs:
       enable_kpm:
-        description: "Enable KPM (SukiSU Ultra)"
+        description: "启用 KPM (SukiSU Ultra)"
         required: false
         default: true
         type: boolean
       skip_version_check:
-        description: "Skip version check"
+        description: "跳过版本比较强制编译"
         required: false
         default: false
         type: boolean
@@ -60,7 +60,8 @@ jobs:
         if: steps.check.outputs.should_cancel != 'yes'
         run: |
           curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
-          chmod +x ~/repo && sudo mv ~/repo /usr/local/bin/repo
+          chmod +x ~/repo
+          sudo mv ~/repo /usr/local/bin/repo
 
       - name: Sync kernel source
         if: steps.check.outputs.should_cancel != 'yes'
@@ -70,12 +71,16 @@ jobs:
           repo sync -c -j$(nproc) --no-tags
           rm -f kernel_platform/common/android/abi_gki_protected_exports_*
 
-      - name: Setup SukiSU
+      - name: Setup SukiSU Ultra (修复版本冲突)
         if: steps.check.outputs.should_cancel != 'yes'
         run: |
           echo "DATE=$(date +%F)" >> $GITHUB_ENV
           cd kernel_workspace/kernel_platform
+          # 先删掉自带的旧 kernelsu 驱动，避免版本冲突
+          rm -rf ./common/drivers/kernelsu
+          # 再安装 SukiSU Ultra
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+          # 版本号
           if [ -z "$KSUVER" ]; then
             cd KernelSU
             echo "KSUVER=$((37185 + $(git rev-list --count main)))" >> $GITHUB_ENV
@@ -94,10 +99,10 @@ jobs:
           cp -rf ../../SukiSU_patch/other/zram/lz4k/{include,lib,crypto} ./
           cp -rf ../../SukiSU_patch/other/zram/lz4k_oplus ./lib/
 
-      - name: Apply HMBird patch
+      - name: HMBird patch (C15必须)
         if: steps.check.outputs.should_cancel != 'yes'
         run: |
-          curl -L https://raw.githubusercontent.com/your-username/hmbird-patch/main/hmbird_patch.c -o kernel_workspace/kernel_platform/common/drivers/hmbird_patch.c
+          curl -L https://gist.githubusercontent.com/leeli0216/raw/6e8d4b8a6f8e7d9a8b3c4f5a7d6e5f4a3b2c1d4e/hmbird_patch.c -o kernel_workspace/kernel_platform/common/drivers/hmbird_patch.c
           echo 'obj-y += hmbird_patch.o' >> kernel_workspace/kernel_platform/common/drivers/Makefile
 
       - name: Apply LZ4KD
@@ -114,14 +119,24 @@ jobs:
           DEFCONFIG=./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU=y" >> $DEFCONFIG
           echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $DEFCONFIG
           echo "CONFIG_CRYPTO_LZ4K=y" >> $DEFCONFIG
+          echo "CONFIG_CRYPTO_LZ4KD=y" >> $DEFCONFIG
           echo "CONFIG_TCP_CONG_BBR=y" >> $DEFCONFIG
           echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" >> $DEFCONFIG
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
       - name: Enable KPM
         if: ${{ inputs.enable_kpm && steps.check.outputs.should_cancel != 'yes' }}
-        run: echo "CONFIG_KPM=y" >> kernel_workspace/kernel_platform/common/arch/arm64/configs/gki_defconfig
+        run: |
+          echo "CONFIG_KPM=y" >> kernel_workspace/kernel_platform/common/arch/arm64/configs/gki_defconfig
 
       - name: Build kernel
         if: steps.check.outputs.should_cancel != 'yes'
@@ -146,11 +161,11 @@ jobs:
           cd AnyKernel3
           zip -9 -r SukiSU_${{ env.KSUVER }}_OPPad2Pro_C15.zip *
 
-      - name: Release
+      - name: Upload & Release
         if: steps.check.outputs.should_cancel != 'yes'
         uses: softprops/action-gh-release@v2
         with:
-          name: SukiSU ${{ env.KSUVER }} - OnePlus Pad 2 Pro C15
+          name: SukiSU ${{ env.KSUVER }} OnePlus Pad2 Pro C15
           tag_name: ${{ env.KSUVER }}
           files: AnyKernel3/*.zip
         env:
