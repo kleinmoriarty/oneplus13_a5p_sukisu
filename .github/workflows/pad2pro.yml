@@ -84,7 +84,6 @@ jobs:
           mkdir -p kernel_workspace && cd kernel_workspace
           repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/sm8750 -m oneplus_pad_2_pro.xml --depth=1
           repo sync -c -j$(nproc --all) --no-tags --force-sync
-          # Cleanup ABI files for C15
           rm -f kernel_platform/common/android/abi_gki_protected_exports_*
           rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_*
 
@@ -93,9 +92,7 @@ jobs:
         run: |
           echo "DATE=$(date +%F)" >> $GITHUB_ENV
           cd kernel_workspace/kernel_platform
-          # Fetch latest SukiSU Ultra
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
-          # Calculate Version if not set
           if [ -z "${{ env.KSUVER }}" ]; then
             cd KernelSU
             KSUVER=$((37185 + $(git rev-list --count main)))
@@ -106,26 +103,21 @@ jobs:
         if: steps.version_check.outputs.should_cancel != 'true'
         run: |
           cd kernel_workspace
-          # Clone dependencies
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6 --depth=1
           git clone https://github.com/SukiSU-Ultra/SukiSU_patch.git --depth=1
           
           cd kernel_platform/common
-          # Copy SUSFS files
           cp ../../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./
           cp -rf ../../susfs4ksu/kernel_patches/fs ./
           cp -rf ../../susfs4ksu/kernel_patches/include ./
-          # Copy LZ4K files
           cp -rf ../../SukiSU_patch/other/zram/lz4k/{include,lib,crypto} ./
           cp -rf ../../SukiSU_patch/other/zram/lz4k_oplus ./lib/
-          # Apply patches
           patch -p1 -F 3 < 50_add_susfs_in_gki-android15-6.6.patch || echo "SUSFS patch applied or skipped"
 
       - name: HMBird OGKI -> GKI Patch (Critical for C15)
         if: steps.version_check.outputs.should_cancel != 'true'
         run: |
           cd kernel_workspace/kernel_platform/common/drivers
-          # Correct indentation here is crucial for YAML
           cat << 'EOF' > hmbird_patch.c
 #include <linux/init.h>
 #include <linux/module.h>
@@ -175,7 +167,6 @@ early_initcall(hmbird_patch_init);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Force HMBIRD_OGKI to HMBIRD_GKI for ColorOS 15");
 EOF
-          # Add to Makefile
           grep -q "hmbird_patch.o" Makefile || echo "obj-y += hmbird_patch.o" >> Makefile
 
       - name: Apply LZ4KD Patch
@@ -191,12 +182,10 @@ EOF
           cd kernel_workspace/kernel_platform
           DEFCONFIG=./common/arch/arm64/configs/gki_defconfig
           
-          # Base Config
           echo "# SukiSU Ultra Base" >> $DEFCONFIG
           echo "CONFIG_KSU=y" >> $DEFCONFIG
           echo "CONFIG_LOCALVERSION_AUTO=n" >> $DEFCONFIG
           
-          # SUSFS Config (Full)
           echo "# SUSFS Configuration" >> $DEFCONFIG
           echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
           echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> $DEFCONFIG
@@ -212,21 +201,18 @@ EOF
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> $DEFCONFIG
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $DEFCONFIG
 
-          # Compression (LZ4K/LZ4KD)
           echo "# Compression" >> $DEFCONFIG
           echo "CONFIG_CRYPTO_LZ4HC=y" >> $DEFCONFIG
           echo "CONFIG_CRYPTO_LZ4K=y" >> $DEFCONFIG
           echo "CONFIG_CRYPTO_LZ4KD=y" >> $DEFCONFIG
           echo "CONFIG_CRYPTO_842=y" >> $DEFCONFIG
 
-          # Network (BBR)
           echo "# Network (BBR)" >> $DEFCONFIG
           echo "CONFIG_TCP_CONG_ADVANCED=y" >> $DEFCONFIG
           echo "CONFIG_TCP_CONG_BBR=y" >> $DEFCONFIG
           echo "CONFIG_NET_SCH_FQ=y" >> $DEFCONFIG
           echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" >> $DEFCONFIG
 
-          # Disable defconfig check for C15
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
       - name: Enable KPM Module (Conditional)
@@ -239,11 +225,8 @@ EOF
         if: steps.version_check.outputs.should_cancel != 'true'
         run: |
           cd kernel_workspace/kernel_platform/common
-          # Set Build Timestamp
           export KBUILD_BUILD_TIMESTAMP="$(date -u)"
-          # Path to Clang Toolchain
           export PATH="$PWD/../prebuilts/clang/host/linux-x86/clang-r510928/bin:$PATH"
-          # Build Command
           make -j$(nproc --all) LLVM=1 ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CC=clang LD=ld.lld HOSTLD=ld.lld \
@@ -253,12 +236,9 @@ EOF
         if: steps.version_check.outputs.should_cancel != 'true'
         run: |
           cd kernel_workspace/kernel_platform/common/out/arch/arm64/boot
-          # Download latest patcher
           curl -L https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.12.0/patch_linux -o patch_linux
           chmod +x patch_linux
-          # Apply patch
           ./patch_linux
-          # Rename output
           mv oImage Image
 
       - name: Package with AnyKernel3
@@ -267,7 +247,6 @@ EOF
           git clone https://github.com/Kernel-SU/AnyKernel3.git --depth=1
           cp kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image AnyKernel3/
           cd AnyKernel3
-          # Create flashable zip
           zip -9 -r SukiSU_${{ env.KSUVER }}_OPPad2Pro_C15_6.6.57.zip *
 
       - name: Upload Artifact
